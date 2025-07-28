@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 import os
+import shutil
 from image_utils.debug_manager import save_debug_image
 from config import COLOR_RANGES
 
@@ -117,19 +118,29 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
     # Lista per memorizzare tutte le matite del colore specificato (dopo la divisione)
     all_pencils = []
     
-    # Debug: salva solo l'immagine con i contorni filtrati
+    # Debug: crea una cartella per questo colore e salva le informazioni richieste
     if debug:
         # Creiamo la directory per questo colore
         from image_utils.debug_manager import prepare_debug_directory
         debug_dir = prepare_debug_directory()
         color_debug_dir = os.path.join(debug_dir, color)
+        # Rimuovi la cartella se esiste già
+        if os.path.exists(color_debug_dir):
+            shutil.rmtree(color_debug_dir)
         os.makedirs(color_debug_dir, exist_ok=True)
         
         # Salva l'immagine con i contorni filtrati
         contours_img = image.copy()
         cv2.drawContours(contours_img, filtered_contours, -1, (0, 255, 0), 2)
-        filtered_contours_path = os.path.join(color_debug_dir, f"{color}_detected_pencils.jpg")
+        filtered_contours_path = os.path.join(color_debug_dir, f"all_detected_{color}_pencils.jpg")
         cv2.imwrite(filtered_contours_path, contours_img)
+        
+        # Crea un file CSV per salvare le informazioni sulle matite rilevate
+        csv_path = os.path.join(color_debug_dir, f"{color}_pencils_info.csv")
+        csv_headers = ['id', 'x', 'y', 'width', 'height', 'area', 'aspect_ratio', 'num_divisions']
+        with open(csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_headers)
     
     # Per ogni contorno, crea un "pencil" e prova a dividerlo
     for i, contour in enumerate(filtered_contours):
@@ -152,6 +163,14 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
         if is_duplicate:
             continue
         
+        # Estrai la regione della matita dall'immagine originale
+        pencil_region = image[y:y+h, x:x+w]
+        
+        # Se debug è attivo, salva l'immagine dell'area rilevata
+        if debug:
+            area_path = os.path.join(color_debug_dir, f"{color}_area_{i+1}.jpg")
+            cv2.imwrite(area_path, pencil_region)
+        
         # Crea un dizionario pencil
         pencil = {
             'bbox': current_bbox,
@@ -161,7 +180,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
         }
         
         # Prova a dividere la matita
-        split_results = split_pencils(image, pencil, hsv_image=hsv, debug=debug)
+        split_results = split_pencils(image, pencil, hsv_image=hsv, debug=debug, area_id=i+1)
         
         # Aggiorna il colore per ogni matita divisa
         for split_pencil in split_results:
@@ -179,6 +198,15 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
             
             if not is_duplicate:
                 non_overlapping_results.append(split_pencil)
+                
+                # Se debug è attivo, aggiungi le informazioni al CSV
+                if debug:
+                    px, py, pw, ph = split_pencil['bbox']
+                    area = cv2.contourArea(contour)
+                    aspect_ratio = float(h) / w if w > 0 else 0
+                    with open(os.path.join(color_debug_dir, f"{color}_pencils_info.csv"), 'a', newline='') as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow([f"{i+1}_{j+1}", x + px, y + py, pw, ph, area, aspect_ratio, len(split_results)])
         
         # Aggiungi le matite divise non sovrapposte alla lista dei risultati
         all_pencils.extend(non_overlapping_results)
@@ -186,7 +214,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
     return all_pencils
 
 
-def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarray = None, debug: bool = False) -> List[Dict[str, Any]]:
+def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarray = None, debug: bool = False, area_id: int = 0) -> List[Dict[str, Any]]:
     """
     Split a detected pencil that might actually be multiple pencils based on hue variations.
     Questa funzione generalizzata funziona con qualsiasi colore.
@@ -290,8 +318,8 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     if color_name == 'red' and hue_diff > 150:  # Probabilmente un cluster è vicino a 0 e l'altro vicino a 180
         hue_diff = 180 - hue_diff  # La vera differenza è minore
     
-    # Save debug info about clustering solo se c'è una divisione significativa
-    if debug and hue_diff >= threshold:
+    # Save debug info about clustering
+    if debug:
         # Assicuriamoci che la directory esista
         from image_utils.debug_manager import prepare_debug_directory
         debug_dir = prepare_debug_directory()
@@ -333,7 +361,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
             cv2.addWeighted(overlay, alpha, cluster_vis, 1 - alpha, 0, cluster_vis)
         
         # Salva l'immagine con la visualizzazione del clustering
-        split_vis_path = os.path.join(color_debug_dir, f"{color_name}_split_visualization.jpg")
+        split_vis_path = os.path.join(color_debug_dir, f"{color_name}_area_{area_id}_split_visualization.jpg")
         cv2.imwrite(split_vis_path, cluster_vis)
     
     if hue_diff < threshold:  # Soglia aumentata
@@ -420,6 +448,25 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     # If we don't have at least 2 valid contours, return the original pencil
     if len(all_contours) < 2:
         return [pencil]
+        
+    # Se debug è attivo, salva un CSV con le informazioni sulle divisioni
+    if debug and len(all_contours) >= 2:
+        # Crea un dizionario con le informazioni sulle divisioni
+        split_info = {
+            'area_id': area_id,
+            'color': color_name,
+            'num_divisions': len(all_contours),
+            'hue_diff': hue_diff,
+            'threshold': threshold,
+            'k_clusters': k
+        }
+        # Salva il CSV con le informazioni
+        csv_path = os.path.join(color_debug_dir, f"{color_name}_area_{area_id}_split_info.csv")
+        with open(csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['key', 'value'])
+            for key, value in split_info.items():
+                writer.writerow([key, str(value)])
     
     # Create new pencils from the contours
     split_pencils = []
@@ -433,6 +480,14 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
         # Convert to global coordinate system
         global_x = x + x_cont
         global_y = y + y_cont
+        
+        # Se debug è attivo, salva l'immagine della divisione
+        if debug:
+            # Estrai la regione della matita divisa
+            division_region = pencil_region[y_cont:y_cont+h_cont, x_cont:x_cont+w_cont].copy()
+            # Salva l'immagine della divisione
+            division_path = os.path.join(color_debug_dir, f"{color_name}_area_{area_id}_division_{i+1}.jpg")
+            cv2.imwrite(division_path, division_region)
         
         # Create a new pencil dictionary
         new_pencil = pencil.copy()
