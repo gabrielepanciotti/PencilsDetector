@@ -80,14 +80,15 @@ def save_debug_images(
 ) -> None:
     """
     Save debug images to disk with numbered labels and process descriptions.
+    This function is now a wrapper around the new debug_manager functions.
     
     Args:
         images: Dictionary of images to save (name -> image)
         debug_dir: Directory to save debug images
         process_name: Name of the processing step (optional)
     """
-    # Create debug directory if it doesn't exist
-    os.makedirs(debug_dir, exist_ok=True)
+    # Import here to avoid circular imports
+    from image_utils.debug_manager import save_debug_image
     
     # Save each image with numbered labels
     for i, (name, image) in enumerate(images.items(), 1):
@@ -109,6 +110,5 @@ def save_debug_images(
         cv2.putText(labeled_image, label_text, (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
-        # Save the image
-        output_path = os.path.join(debug_dir, f"{i:02d}_{name}.jpg")
-        cv2.imwrite(output_path, labeled_image)
+        # Save the image using the new debug manager
+        save_debug_image(labeled_image, f"{name}.jpg", process_name)
