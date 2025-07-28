@@ -35,10 +35,12 @@ COLOR_RANGES = {
     },
     'pink': {
         # Includiamo sia il rosa tradizionale che il rosa carne
+        # Primo range: rosa tradizionale (più vicino al viola)
         'lower1': np.array([161, 40, 100]),
         'upper1': np.array([170, 150, 255]),
+        # Secondo range: rosa carne (più stretto per evitare sovrapposizioni con il rosso)
         'lower2': np.array([5, 50, 150]),
-        'upper2': np.array([15, 150, 255])
+        'upper2': np.array([10, 150, 255])
     },
     'brown': {
         'lower': np.array([5, 50, 50]),

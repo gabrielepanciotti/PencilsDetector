@@ -1,29 +1,28 @@
-# Pencil Detector
+# FlyCatcher - Sistema Avanzato di Rilevamento Matite Colorate
 
-Un sistema di computer vision tradizionale per rilevare, contare e localizzare matite colorate nelle immagini.
+Un sistema di computer vision avanzato per rilevare, contare e localizzare matite colorate nelle immagini, con particolare attenzione al rilevamento accurato delle punte e alla gestione di matite sovrapposte o vicine.
 
-## Caratteristiche
+## Caratteristiche Principali
 
-- Rilevamento di matite verdi utilizzando maschere di colore HSV
-- Rilevamento di matite di tutti i colori utilizzando edge detection e classificazione del colore
-- Filtri per area e aspect ratio per migliorare la precisione del rilevamento
-- Visualizzazione dei risultati con bounding box colorate
-- Esportazione dei risultati in formato JSON
-- Modalità di debug per la visualizzazione di immagini intermedie
+- **Rilevamento Multi-Colore**: Supporto per matite di diversi colori (verde, rosso, blu, giallo, viola, arancione, rosa, marrone, azzurro, nero)
+- **Divisione Intelligente**: Algoritmo di clustering K-means per separare matite dello stesso colore vicine o sovrapposte
+- **Rilevamento Punte**: Sistema specializzato per identificare le punte delle matite e associarle correttamente alle basi
+- **Gestione Casi Speciali**: Trattamento specifico per colori problematici come rosso (gestione del wrapping hue), viola (maschere ampliate) e rosa (filtri aggiuntivi)
+- **Visualizzazione Avanzata**: Output visivo con bounding box colorate e etichette per ogni matita rilevata
+- **Modalità Debug**: Generazione di immagini intermedie per analizzare ogni fase del processo di rilevamento
 
-## Struttura del Progetto
+## Architettura del Sistema
 
 ```
-pencil_detector/
-├── main.py              # Funzioni principali di rilevamento
-├── requirements.txt     # Dipendenze
-├── README.md           # Documentazione
-├── config.py           # Parametri di configurazione
-├── run.py              # Script di esecuzione principale
-│
-├── image_utils/        # Utilità per il caricamento e preprocessing delle immagini
-│   ├── __init__.py
-│   ├── loader.py       # Caricamento immagini
+FlyCatcher/
+├── main.py                  # Script principale per l'esecuzione del rilevamento
+├── config.py                # Configurazioni (range HSV, mappature colori)
+├── detection/
+│   ├── pencil_splitting.py  # Algoritmi di divisione e rilevamento punte
+│   └── pencil_detector.py   # Classe base per il rilevamento delle matite
+├── results/                 # Directory per i risultati
+├── debug/                   # Directory per le immagini di debug
+└── README.md                # Documentazione
 │   ├── preprocessing.py # Preprocessing, blur, HSV
 │   └── visualization.py # Annotazioni e salvataggi
 │
@@ -69,25 +68,31 @@ python -m pencil_detector.run --image data/pencils.jpg --output-dir output
 ## Esempio di Output
 
 ```
+Debug mode enabled. Debug images will be saved to C:\Users\GabrielePanciotti\Desktop\Programming\FlyCatcher\FlyCatcher-Task\debug
 Loaded image with shape: (3261, 4905, 3)
-Found 2 green pencils
-Found 5 pencils in total
-Visualization saved to output/pencils_detected.jpg
-Results saved to output/pencils_results.json
+Punta 1 (area: 26282.5) unita alla matita 0 (colore: green)
+Punta 2 (area: 26114.5) unita alla matita 1 (colore: green)
+Rilevate 2 matite green
+Punta 199 (area: 10115.5) unita alla matita 0 (colore: red)
+Punta 198 (area: 5013.5) unita alla matita 1 (colore: red)
+Rilevate 2 matite red
+Punta 16 (area: 12294.5) unita alla matita 0 (colore: blue)
+Rilevate 1 matite blue
+Punta 24 (area: 24258.5) unita alla matita 0 (colore: yellow)
+Rilevate 1 matite yellow
+Punta 208 (area: 516.0) unita alla matita 0 (colore: purple)
+Rilevate 1 matite purple
+Punta 9 (area: 3335.5) unita alla matita 0 (colore: orange)
+Rilevate 1 matite orange
+Punta 184 (area: 31880.0) unita alla matita 0 (colore: pink)
+Punta 184 (area: 31880.0) unita alla matita 1 (colore: pink)
+Rilevate 2 matite pink
+Rilevate 0 matite brown
+Punta 14 (area: 25358.5) unita alla matita 0 (colore: light_blue)
+Rilevate 1 matite light_blue
+Punta 268 (area: 9273.0) unita alla matita 0 (colore: black)
+Rilevate 1 matite black
 
-=== Pencil Detection Results ===
-Total pencils found: 5
-Green pencils found: 2
-
-Green pencil positions:
-  Green pencil 1: Center at (1234, 567), Bounding box: (1200, 500, 68, 134)
-  Green pencil 2: Center at (2345, 678), Bounding box: (2300, 600, 90, 156)
-
-Pencil counts by color:
-  Blue: 1
-  Green: 2
-  Red: 1
-  Yellow: 1
-
-Results saved to output
+Risultati salvati in results
+Immagine risultato: results\pencils_detected.jpg
 ```

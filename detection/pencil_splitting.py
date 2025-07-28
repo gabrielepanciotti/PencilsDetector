@@ -4,11 +4,273 @@ Module for detecting and splitting pencils of different colors.
 import csv
 import cv2
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, TYPE_CHECKING
 import os
 import shutil
 from image_utils.debug_manager import save_debug_image
 from config import COLOR_RANGES
+
+# Evita errori di importazione circolare per i type hints
+if TYPE_CHECKING:
+    from pencil_splitting import PencilDetector
+
+
+class PencilDetector:
+    """
+    Classe per la rilevazione e gestione delle matite.
+    Centralizza le operazioni comuni per evitare duplicazioni di codice.
+    """
+    def __init__(self, image: np.ndarray, color_name: str = 'unknown', debug: bool = False):
+        """
+        Inizializza il rilevatore di matite.
+        
+        Args:
+            image: Immagine originale in formato BGR
+            color_name: Nome del colore delle matite da rilevare
+            debug: Se True, salva le immagini di debug
+        """
+        self.image = image
+        self.color_name = color_name
+        self.debug = debug
+        self.hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        self.color_mask = None
+        self.debug_dir = None
+        self.color_debug_dir = None
+        
+        if debug:
+            from image_utils.debug_manager import prepare_debug_directory
+            self.debug_dir = prepare_debug_directory()
+            self.color_debug_dir = os.path.join(self.debug_dir, color_name)
+            os.makedirs(self.color_debug_dir, exist_ok=True)
+    
+    def create_color_mask(self, hsv_image: np.ndarray = None) -> np.ndarray:
+        """
+        Crea una maschera per il colore specificato.
+        Se la maschera è già stata calcolata per l'immagine HSV principale e non viene fornita
+        un'immagine HSV specifica, riutilizza la maschera esistente.
+        
+        Args:
+            hsv_image: Immagine HSV (opzionale, se non fornita usa self.hsv_image)
+            
+        Returns:
+            Maschera binaria per il colore specificato
+        """
+        # Se non viene fornita un'immagine HSV specifica e abbiamo già calcolato la maschera
+        # per l'immagine HSV principale, riutilizziamo quella
+        if hsv_image is None:
+            hsv_image = self.hsv_image
+            if self.color_mask is not None:
+                return self.color_mask
+            
+        # Crea la maschera per il colore specificato
+        if self.color_name == 'red' or self.color_name == 'pink':
+            # Per il rosso e il rosa dobbiamo combinare due intervalli
+            mask1 = cv2.inRange(hsv_image, COLOR_RANGES[self.color_name]['lower1'], COLOR_RANGES[self.color_name]['upper1'])
+            mask2 = cv2.inRange(hsv_image, COLOR_RANGES[self.color_name]['lower2'], COLOR_RANGES[self.color_name]['upper2'])
+            color_mask = cv2.bitwise_or(mask1, mask2)
+        elif self.color_name in COLOR_RANGES:
+            color_mask = cv2.inRange(hsv_image, COLOR_RANGES[self.color_name]['lower'], COLOR_RANGES[self.color_name]['upper'])
+        else:
+            # Se il colore non è supportato, usiamo una maschera che include tutti i pixel non neri
+            s_channel = hsv_image[:, :, 1]
+            v_channel = hsv_image[:, :, 2]
+            color_mask = cv2.bitwise_and(s_channel > 30, v_channel > 30)
+            color_mask = color_mask.astype(np.uint8) * 255
+        
+        # Se stiamo usando l'immagine HSV principale, memorizziamo la maschera
+        if hsv_image is self.hsv_image:
+            self.color_mask = color_mask
+            
+        return color_mask
+    
+    def apply_morphology(self, mask: np.ndarray, kernel_size: int = 5, close_iterations: int = 2, open_iterations: int = 1) -> np.ndarray:
+        """
+        Applica operazioni morfologiche alla maschera.
+        
+        Args:
+            mask: Maschera binaria
+            kernel_size: Dimensione del kernel
+            close_iterations: Numero di iterazioni per l'operazione di chiusura
+            open_iterations: Numero di iterazioni per l'operazione di apertura
+            
+        Returns:
+            Maschera binaria migliorata
+        """
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iterations)
+        return mask
+    
+    def find_contours(self, mask: np.ndarray) -> List:
+        """
+        Trova i contorni nella maschera.
+        
+        Args:
+            mask: Maschera binaria
+            
+        Returns:
+            Lista di contorni trovati
+        """
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Per i colori problematici, se non troviamo abbastanza contorni, proviamo un approccio alternativo
+        if self.color_name in ['red', 'black', 'purple', 'pink'] and len(contours) < 5:
+            # Proviamo un approccio basato sulla saturazione e valore piuttosto che sul colore
+            # Questo è utile per rilevare le mine che hanno colori diversi dal corpo della matita
+            h, s, v = cv2.split(self.hsv_image)
+            
+            # Creiamo una maschera basata principalmente su saturazione e valore
+            # per catturare le mine che hanno colori diversi
+            if self.color_name == 'red':
+                # Per il rosso con mina marrone
+                alt_mask = cv2.inRange(s, 20, 200) & cv2.inRange(v, 30, 200)
+            elif self.color_name == 'black':
+                # Per il nero con mina grigia
+                alt_mask = cv2.inRange(s, 0, 80) & cv2.inRange(v, 30, 150)
+            elif self.color_name == 'purple':
+                # Per il viola
+                alt_mask = cv2.inRange(s, 30, 200) & cv2.inRange(v, 30, 200)
+            elif self.color_name == 'pink':
+                # Per il rosa carne
+                alt_mask = cv2.inRange(s, 20, 150) & cv2.inRange(v, 100, 230)
+            
+            # Applichiamo operazioni morfologiche per migliorare la maschera alternativa
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            alt_mask = cv2.morphologyEx(alt_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            alt_mask = cv2.morphologyEx(alt_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Salva la maschera alternativa se in modalità debug
+            if self.debug:
+                self.save_debug_image(alt_mask, f"{self.color_name}_alt_mask_for_tips.jpg")
+            
+            # Trova i contorni nella maschera alternativa
+            alt_contours, _ = cv2.findContours(alt_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Combina i contorni trovati con entrambi i metodi
+            contours = contours + alt_contours
+        
+        return contours
+    
+    def filter_contours_by_area(self, contours: List, min_area: int, max_area: Optional[int] = None) -> List:
+        """
+        Filtra i contorni per area.
+        
+        Args:
+            contours: Lista di contorni
+            min_area: Area minima
+            max_area: Area massima (opzionale)
+            
+        Returns:
+            Lista di contorni filtrati
+        """
+        filtered_contours = []
+        
+        for c in contours:
+            area = cv2.contourArea(c)
+            if min_area <= area and (max_area is None or area <= max_area):
+                filtered_contours.append(c)
+                
+        return filtered_contours
+    
+    def filter_contours_by_aspect_ratio(self, contours: List, min_ratio: float, max_ratio: float) -> List:
+        """
+        Filtra i contorni per rapporto d'aspetto.
+        
+        Args:
+            contours: Lista di contorni
+            min_ratio: Rapporto d'aspetto minimo (h/w)
+            max_ratio: Rapporto d'aspetto massimo (h/w)
+            
+        Returns:
+            Lista di contorni filtrati con bounding box
+        """
+        filtered_contours = []
+        
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            aspect_ratio = float(h) / w if w > 0 else 1000
+            
+            if min_ratio <= aspect_ratio <= max_ratio:
+                filtered_contours.append((x, y, w, h, c))
+                
+        return filtered_contours
+    
+    def get_min_max_area_for_tips(self) -> Tuple[int, int]:
+        """
+        Restituisce le soglie di area minima e massima per le punte in base al colore.
+        
+        Returns:
+            Tupla (min_area, max_area)
+        """
+        if self.color_name == 'red':
+            max_area = 50000  # Soglia molto più alta per il rosso che può avere punte di diversi colori
+            min_area = 50     # Soglia minima molto ridotta per il rosso
+        elif self.color_name == 'pink':
+            max_area = 45000  # Soglia più alta per il rosa
+            min_area = 70
+        elif self.color_name == 'black':
+            max_area = 30000  # Soglia aumentata per il nero
+            min_area = 40     # Soglia minima ridotta per il nero
+        elif self.color_name == 'blue' or self.color_name == 'light_blue':
+            max_area = 35000  # Soglia specifica per il blu/azzurro
+            min_area = 70
+        elif self.color_name == 'yellow':
+            max_area = 30000  # Soglia specifica per il giallo
+            min_area = 80
+        elif self.color_name == 'purple':
+            max_area = 32000  # Soglia aumentata per il viola
+            min_area = 50     # Soglia minima ridotta per il viola
+        elif self.color_name == 'orange':
+            max_area = 32000  # Soglia specifica per l'arancione
+            min_area = 80
+        elif self.color_name == 'green':
+            max_area = 35000  # Soglia specifica per il verde
+            min_area = 50     # Soglia minima ridotta per il verde
+        else:
+            max_area = 30000  # Soglia standard per gli altri colori
+            min_area = 50     # Soglia minima ridotta per evitare di perdere punte piccole
+            
+        return min_area, max_area
+    
+    def get_max_aspect_ratio_for_tips(self) -> float:
+        """
+        Restituisce il rapporto d'aspetto massimo per le punte in base al colore.
+        
+        Returns:
+            Rapporto d'aspetto massimo
+        """
+        if self.color_name == 'red':
+            return 8.0  # Molto più permissivo per il rosso
+        elif self.color_name == 'pink':
+            return 7.0  # Più permissivo per il rosa
+        elif self.color_name == 'black':
+            return 6.5  # Più permissivo per il nero
+        elif self.color_name in ['purple', 'violet']:
+            return 6.0  # Più permissivo per il viola
+        elif self.color_name in ['blue', 'light_blue']:
+            return 5.5  # Per blu/azzurro
+        elif self.color_name == 'green':
+            return 5.0  # Specifico per il verde
+        else:
+            return 5.0  # Standard aumentato per gli altri colori
+    
+    def save_debug_image(self, image: np.ndarray, filename: str) -> str:
+        """
+        Salva un'immagine di debug.
+        
+        Args:
+            image: Immagine da salvare
+            filename: Nome del file
+            
+        Returns:
+            Percorso completo del file salvato
+        """
+        if not self.debug:
+            return ""
+            
+        filepath = os.path.join(self.color_debug_dir, filename)
+        cv2.imwrite(filepath, image)
+        return filepath
 
 
 def calculate_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
@@ -64,36 +326,30 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
     Returns:
         Lista di dizionari contenenti le informazioni sulle matite divise
     """
+    # Crea un'istanza del rilevatore di matite
+    detector = PencilDetector(image, color, debug)
+    
     # Converti in HSV
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hsv = detector.hsv_image
     
     # Crea la maschera per il colore specificato
-    if color == 'red' or color == 'pink':
-        # Per il rosso e il rosa dobbiamo combinare due intervalli
-        mask1 = cv2.inRange(hsv, COLOR_RANGES[color]['lower1'], COLOR_RANGES[color]['upper1'])
-        mask2 = cv2.inRange(hsv, COLOR_RANGES[color]['lower2'], COLOR_RANGES[color]['upper2'])
-        color_mask = cv2.bitwise_or(mask1, mask2)
-    elif color in COLOR_RANGES:
-        color_mask = cv2.inRange(hsv, COLOR_RANGES[color]['lower'], COLOR_RANGES[color]['upper'])
-    else:
-        raise ValueError(f"Colore '{color}' non supportato. Colori disponibili: {list(COLOR_RANGES.keys())}")
+    color_mask = detector.create_color_mask(hsv)
     
     # Applica operazioni morfologiche per migliorare la maschera
-    kernel = np.ones((5, 5), np.uint8)
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    color_mask = detector.apply_morphology(color_mask)
     
     # Salva solo la maschera finale se richiesto
     if debug:
         # Salviamo solo l'immagine della maschera del colore rilevato
-        save_debug_image(color_mask, f"{color}_mask.jpg", f"{color}_detection")
+        detector.save_debug_image(color_mask, f"{color}_mask.jpg")
     
     # Trova i contorni nella maschera
-    contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = detector.find_contours(color_mask)
     
     # Filtra i contorni per area e rapporto altezza/larghezza
     # Imposta soglie di area minima diverse per colori diversi
-    min_area = 40000   # Soglia più alta per il rosso, ma aumentiamo anche per gli altri colori
+    min_area = 40000   # Soglia standard per la maggior parte dei colori
+        
     filtered_contours = []
     
     for c in contours:
@@ -109,7 +365,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
         if aspect_ratio < 2.0:  # Deve essere almeno due volte più alta che larga
             continue
             
-        # Aggiungiamo un filtro sulla larghezza minima solo per il rosso
+        # Aggiungiamo un filtro sulla larghezza minima
         if w < 200:
             continue
 
@@ -121,22 +377,20 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
     # Debug: crea una cartella per questo colore e salva le informazioni richieste
     if debug:
         # Creiamo la directory per questo colore
-        from image_utils.debug_manager import prepare_debug_directory
-        debug_dir = prepare_debug_directory()
-        color_debug_dir = os.path.join(debug_dir, color)
+        debug_dir = detector.color_debug_dir
         # Rimuovi la cartella se esiste già
-        if os.path.exists(color_debug_dir):
-            shutil.rmtree(color_debug_dir)
-        os.makedirs(color_debug_dir, exist_ok=True)
+        if os.path.exists(debug_dir):
+            shutil.rmtree(debug_dir)
+        os.makedirs(debug_dir, exist_ok=True)
         
         # Salva l'immagine con i contorni filtrati
         contours_img = image.copy()
         cv2.drawContours(contours_img, filtered_contours, -1, (0, 255, 0), 2)
-        filtered_contours_path = os.path.join(color_debug_dir, f"all_detected_{color}_pencils.jpg")
+        filtered_contours_path = os.path.join(debug_dir, f"all_detected_{color}_pencils.jpg")
         cv2.imwrite(filtered_contours_path, contours_img)
         
         # Crea un file CSV per salvare le informazioni sulle matite rilevate
-        csv_path = os.path.join(color_debug_dir, f"{color}_pencils_info.csv")
+        csv_path = os.path.join(debug_dir, f"{color}_pencils_info.csv")
         csv_headers = ['id', 'x', 'y', 'width', 'height', 'area', 'aspect_ratio', 'num_divisions']
         with open(csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
@@ -155,7 +409,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
             iou = calculate_iou(current_bbox, existing_bbox)
             
             # Se l'IoU è alto, consideriamo questa come una duplicazione
-            if iou > 0.2:  # Soglia di sovrapposizione abbassata per essere più restrittivi
+            if iou > 0.2: 
                 is_duplicate = True
                 break
         
@@ -168,7 +422,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
         
         # Se debug è attivo, salva l'immagine dell'area rilevata
         if debug:
-            area_path = os.path.join(color_debug_dir, f"{color}_area_{i+1}.jpg")
+            area_path = os.path.join(debug_dir, f"{color}_area_{i+1}.jpg")
             cv2.imwrite(area_path, pencil_region)
         
         # Crea un dizionario pencil
@@ -180,7 +434,7 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
         }
         
         # Prova a dividere la matita
-        split_results = split_pencils(image, pencil, hsv_image=hsv, debug=debug, area_id=i+1)
+        split_results = split_pencils(image, pencil, detector, hsv_image=hsv, debug=debug, area_id=i+1)
         
         # Aggiorna il colore per ogni matita divisa
         for split_pencil in split_results:
@@ -204,17 +458,20 @@ def detect_and_split_pencils(image: np.ndarray, color: str = 'green', debug: boo
                     px, py, pw, ph = split_pencil['bbox']
                     area = cv2.contourArea(contour)
                     aspect_ratio = float(h) / w if w > 0 else 0
-                    with open(os.path.join(color_debug_dir, f"{color}_pencils_info.csv"), 'a', newline='') as csvfile:
+                    with open(os.path.join(debug_dir, f"{color}_pencils_info.csv"), 'a', newline='') as csvfile:
                         writer = csv.writer(csvfile)
                         writer.writerow([f"{i+1}_{j+1}", x + px, y + py, pw, ph, area, aspect_ratio, len(split_results)])
         
         # Aggiungi le matite divise non sovrapposte alla lista dei risultati
         all_pencils.extend(non_overlapping_results)
     
+    # Rileva e unisci le punte delle matite
+    all_pencils = detect_and_merge_pencil_tips(image, all_pencils, detector, hsv_image=hsv, debug=debug, color_name=color)
+    
     return all_pencils
 
 
-def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarray = None, debug: bool = False, area_id: int = 0) -> List[Dict[str, Any]]:
+def split_pencils(image: np.ndarray, pencil: Dict[str, Any], detector: 'PencilDetector', hsv_image: np.ndarray = None, debug: bool = False, area_id: int = 0, force_clusters: int = None) -> List[Dict[str, Any]]:
     """
     Split a detected pencil that might actually be multiple pencils based on hue variations.
     Questa funzione generalizzata funziona con qualsiasi colore.
@@ -223,13 +480,18 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     Args:
         image: Original image in BGR format
         pencil: Dictionary containing pencil information
+        detector: Istanza di PencilDetector per operazioni di rilevamento
         hsv_image: HSV version of the image (optional)
         debug: Whether to save debug images
         area_id: ID of the area for debug purposes
+        force_clusters: Force a specific number of clusters (optional)
         
     Returns:
         List of dictionaries containing split pencil information
     """
+    # Get the color name from the pencil
+    color_name = pencil.get('color_name', 'unknown')
+    
     # Extract the pencil region
     x, y, w, h = pencil['bbox']
     pencil_region = image[y:y+h, x:x+w].copy()
@@ -240,27 +502,9 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     else:
         hsv_region = hsv_image[y:y+h, x:x+w].copy()
     
-    # Get the color name from the pencil
-    color_name = pencil.get('color_name', 'unknown')
-    
-    # Create a mask for the colored pixels in the region based on the pencil's color
-    # Utilizziamo le definizioni di colore da config.py
-    
-    # Crea la maschera per il colore specificato
-    if color_name == 'red' or color_name == 'pink':
-        # Per il rosso e il rosa dobbiamo combinare due intervalli
-        mask1 = cv2.inRange(hsv_region, COLOR_RANGES[color_name]['lower1'], COLOR_RANGES[color_name]['upper1'])
-        mask2 = cv2.inRange(hsv_region, COLOR_RANGES[color_name]['lower2'], COLOR_RANGES[color_name]['upper2'])
-        color_mask = cv2.bitwise_or(mask1, mask2)
-    elif color_name in COLOR_RANGES:
-        color_mask = cv2.inRange(hsv_region, COLOR_RANGES[color_name]['lower'], COLOR_RANGES[color_name]['upper'])
-    else:
-        # Se il colore non è supportato, usiamo una maschera che include tutti i pixel non neri
-        # Questo è un fallback per evitare errori
-        s_channel = hsv_region[:, :, 1]
-        v_channel = hsv_region[:, :, 2]
-        color_mask = cv2.bitwise_and(s_channel > 30, v_channel > 30)
-        color_mask = color_mask.astype(np.uint8) * 255
+    # Create a mask for the colored pixels in the region
+    # Utilizziamo il detector per creare la maschera
+    color_mask = detector.create_color_mask(hsv_region)
     
     # Apply the mask to the HSV region
     hsv_colored = hsv_region.copy()
@@ -278,14 +522,9 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     
     # Save debug images if requested - versione ridotta
     if debug:
-        # Creiamo una directory di debug specifica per ogni colore
-        import os
-        from image_utils.debug_manager import prepare_debug_directory
-        debug_dir = prepare_debug_directory()
-        
         # Salviamo solo l'immagine originale e la maschera
-        save_debug_image(pencil_region, f"{color_name}_original_region.jpg", color_name)
-        save_debug_image(color_mask, f"{color_name}_mask.jpg", color_name)
+        detector.save_debug_image(pencil_region, f"{color_name}_original_region.jpg")
+        detector.save_debug_image(color_mask, f"{color_name}_mask.jpg")
     
     if len(hue_values) == 0:
         # No colored pixels found
@@ -295,8 +534,14 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     # Convert to float32 for K-means
     hue_values = np.float32(hue_values.reshape(-1, 1))
     
-    # Try to find 2 clusters (assuming 2 pencils)
-    k = 2
+    # Determina il numero di cluster da utilizzare
+    # Se force_clusters è specificato, usa quel valore
+    # Altrimenti usa 2 come default (per dividere una matita in due)
+    if force_clusters is not None:
+        k = force_clusters
+    else:
+        k = 2
+    
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
     _, labels, centers = cv2.kmeans(hue_values, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
     
@@ -322,12 +567,6 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     
     # Save debug info about clustering
     if debug:
-        # Assicuriamoci che la directory esista
-        from image_utils.debug_manager import prepare_debug_directory
-        debug_dir = prepare_debug_directory()
-        color_debug_dir = os.path.join(debug_dir, color_name)
-        os.makedirs(color_debug_dir, exist_ok=True)
-        
         # Create visualization of the clustering
         cluster_vis = pencil_region.copy()
         
@@ -363,8 +602,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
             cv2.addWeighted(overlay, alpha, cluster_vis, 1 - alpha, 0, cluster_vis)
         
         # Salva l'immagine con la visualizzazione del clustering
-        split_vis_path = os.path.join(color_debug_dir, f"{color_name}_area_{area_id}_split_visualization.jpg")
-        cv2.imwrite(split_vis_path, cluster_vis)
+        detector.save_debug_image(cluster_vis, f"{color_name}_area_{area_id}_split_visualization.jpg")
     
     if hue_diff < threshold:  # Soglia aumentata
         # Se la differenza di tonalità è troppo piccola, è probabilmente la stessa matita
@@ -384,9 +622,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
         cluster_mask[(hue_blurred >= lower_bound) & (hue_blurred <= upper_bound) & (hue_blurred > 0)] = 255
         
         # Apply morphological operations to clean up the mask
-        kernel = np.ones((5, 5), np.uint8)
-        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        cluster_mask = cv2.morphologyEx(cluster_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        cluster_mask = detector.apply_morphology(cluster_mask, kernel_size=5, close_iterations=2, open_iterations=1)
         
         # Per evitare che una singola matita venga divisa in più parti,
         # verifichiamo la connettività della maschera
@@ -414,7 +650,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
     # Find contours in each mask
     all_contours = []
     for i, mask in enumerate(masks):
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = detector.find_contours(mask)
         
         # Filter contours by area - usiamo una soglia alta per eliminare le punte
         min_contour_area = 25000  # Aumentiamo la soglia base per tutti i colori
@@ -426,7 +662,6 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
             if area <= min_contour_area:
                 continue
                 
-
             # Verifichiamo la larghezza solo per il rosso
             if color_name == 'red':
                 x, y, w, h = cv2.boundingRect(c)
@@ -463,7 +698,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
             'k_clusters': k
         }
         # Salva il CSV con le informazioni
-        csv_path = os.path.join(color_debug_dir, f"{color_name}_area_{area_id}_split_info.csv")
+        csv_path = os.path.join(detector.color_debug_dir, f"{color_name}_area_{area_id}_split_info.csv")
         with open(csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['key', 'value'])
@@ -488,8 +723,7 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
             # Estrai la regione della matita divisa
             division_region = pencil_region[y_cont:y_cont+h_cont, x_cont:x_cont+w_cont].copy()
             # Salva l'immagine della divisione con un nome più descrittivo
-            division_path = os.path.join(color_debug_dir, f"{color_name}_pencil_division_{area_id}_{i+1}.jpg")
-            cv2.imwrite(division_path, division_region)
+            detector.save_debug_image(division_region, f"{color_name}_pencil_division_{area_id}_{i+1}.jpg")
         
         # Create a new pencil dictionary
         new_pencil = pencil.copy()
@@ -510,86 +744,145 @@ def split_pencils(image: np.ndarray, pencil: Dict[str, Any], hsv_image: np.ndarr
         return [pencil]
         
     # Ora cerchiamo le punte delle matite
-    pencils_with_tips = detect_and_merge_pencil_tips(image, split_pencils, hsv_image, debug, area_id, color_name)
+    #pencils_with_tips = detect_and_merge_pencil_tips(image, split_pencils, detector, hsv_image=hsv_image, debug=debug, area_id=area_id, color_name=color_name)
     
-    return pencils_with_tips
+    return split_pencils
 
-
-# La funzione split_green_pencils è stata rimossa poiché è stata sostituita dalla funzione generalizzata split_pencils
-
-
-def detect_and_merge_pencil_tips(image: np.ndarray, pencils: List[Dict[str, Any]], hsv_image: np.ndarray = None, debug: bool = False, area_id: int = 0, color_name: str = 'unknown') -> List[Dict[str, Any]]:
+def detect_and_merge_pencil_tips(image: np.ndarray, pencils: List[Dict[str, Any]], detector: 'PencilDetector', hsv_image: np.ndarray = None, debug: bool = False, area_id: int = 0, color_name: str = 'unknown') -> List[Dict[str, Any]]:
+    # Definiamo una funzione interna per salvare immagini di debug CSV
+    def save_debug_csv(filepath, data):
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['key', 'value'])
+            for key, value in data.items():
+                writer.writerow([key, str(value)])
     """
     Rileva le punte delle matite e le unisce con le basi corrispondenti.
     
     Args:
-        image: Immagine originale in formato BGR
-        pencils: Lista di dizionari contenenti le informazioni sulle matite (basi)
+        image: Immagine originale
+        pencils: Lista di matite rilevate
+        detector: Rilevatore di matite
         hsv_image: Immagine HSV (opzionale)
-        debug: Se True, salva le immagini di debug
+        debug: Se True, salva immagini di debug
         area_id: ID dell'area per scopi di debug
         color_name: Nome del colore delle matite
         
     Returns:
         Lista di dizionari contenenti le informazioni sulle matite con punte unite
     """
-    # Importiamo COLOR_MAP da config
-    from config import COLOR_MAP
     # Se non ci sono matite, restituisci la lista vuota
     if not pencils:
         return pencils
+    
+    # Utilizziamo il detector fornito
         
     # Converti in HSV se non fornito
     if hsv_image is None:
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hsv_image = detector.hsv_image
     
     # Crea la maschera per il colore specificato
-    if color_name == 'red' or color_name == 'pink':
-        # Per il rosso e il rosa dobbiamo combinare due intervalli
-        mask1 = cv2.inRange(hsv_image, COLOR_RANGES[color_name]['lower1'], COLOR_RANGES[color_name]['upper1'])
-        mask2 = cv2.inRange(hsv_image, COLOR_RANGES[color_name]['lower2'], COLOR_RANGES[color_name]['upper2'])
-        color_mask = cv2.bitwise_or(mask1, mask2)
-    elif color_name in COLOR_RANGES:
-        color_mask = cv2.inRange(hsv_image, COLOR_RANGES[color_name]['lower'], COLOR_RANGES[color_name]['upper'])
+    color_mask = detector.create_color_mask(hsv_image)
+    
+    # Solo per il rilevamento delle punte, aggiungiamo maschere speciali per colori problematici
+    # Questo non influisce sul rilevamento delle basi delle matite
+    if color_name == 'red':
+        # Per il rosso, includiamo anche tonalità marroni per catturare le mine marroni
+        brown_lower = np.array([5, 30, 30])
+        brown_upper = np.array([20, 200, 200])
+        brown_mask = cv2.inRange(hsv_image, brown_lower, brown_upper)
+        # Creiamo una maschera combinata solo per le punte
+        tip_mask = cv2.bitwise_or(color_mask, brown_mask)
+        # Applichiamo operazioni morfologiche per migliorare la maschera
+        tip_mask = detector.apply_morphology(tip_mask, kernel_size=3, close_iterations=1, open_iterations=1)
+        # Salva la maschera combinata se in modalità debug
+        if debug:
+            detector.save_debug_image(tip_mask, f"{color_name}_tip_mask_with_brown.jpg")
+    elif color_name == 'black':
+        # Per il nero, includiamo anche grigi più chiari per catturare le mine grigie
+        gray_lower = np.array([0, 0, 30])
+        gray_upper = np.array([180, 50, 150])
+        gray_mask = cv2.inRange(hsv_image, gray_lower, gray_upper)
+        # Creiamo una maschera combinata solo per le punte
+        tip_mask = cv2.bitwise_or(color_mask, gray_mask)
+        # Applichiamo operazioni morfologiche per migliorare la maschera
+        tip_mask = detector.apply_morphology(tip_mask, kernel_size=3, close_iterations=1, open_iterations=1)
+        # Salva la maschera combinata se in modalità debug
+        if debug:
+            detector.save_debug_image(tip_mask, f"{color_name}_tip_mask_with_gray.jpg")
+    elif color_name == 'purple' or color_name == 'violet':
+        # Per il viola, includiamo una gamma molto più ampia di saturazione e valore
+        # Usiamo valori di saturazione e valore molto più bassi per catturare anche le mine più chiare
+        purple_lower1 = np.array([120, 5, 5])  # Valori molto più permissivi
+        purple_upper1 = np.array([170, 255, 255])
+        purple_mask1 = cv2.inRange(hsv_image, purple_lower1, purple_upper1)
+        
+        # Aggiungiamo anche una maschera per catturare grigi/neri che potrebbero essere parte della mina
+        gray_lower = np.array([0, 0, 5])
+        gray_upper = np.array([180, 30, 150])
+        gray_mask = cv2.inRange(hsv_image, gray_lower, gray_upper)
+        
+        # Aggiungiamo una maschera per catturare blu scuro che potrebbero essere confusi con viola
+        blue_lower = np.array([100, 50, 50])
+        blue_upper = np.array([115, 255, 150])
+        blue_mask = cv2.inRange(hsv_image, blue_lower, blue_upper)
+        
+        # Creiamo una maschera combinata solo per le punte
+        tip_mask = cv2.bitwise_or(color_mask, purple_mask1)
+        tip_mask = cv2.bitwise_or(tip_mask, gray_mask)
+        tip_mask = cv2.bitwise_or(tip_mask, blue_mask)
+        
+        # Applichiamo operazioni morfologiche per migliorare la maschera
+        # Usiamo operazioni più aggressive per connettere aree frammentate
+        tip_mask = detector.apply_morphology(tip_mask, kernel_size=5, close_iterations=3, open_iterations=1)
+        
+        # Salva la maschera combinata se in modalità debug
+        if debug:
+            detector.save_debug_image(tip_mask, f"{color_name}_tip_mask_expanded.jpg")
+    elif color_name == 'pink':
+        # Per il rosa, creiamo una maschera più precisa per evitare falsi positivi con il rosso
+        # Usiamo un range più stretto per il rosa tradizionale
+        pink_lower1 = np.array([161, 40, 100])
+        pink_upper1 = np.array([170, 150, 255])
+        # E un range più stretto per il rosa carne
+        pink_lower2 = np.array([5, 50, 150])
+        pink_upper2 = np.array([15, 150, 255])
+        
+        pink_mask1 = cv2.inRange(hsv_image, pink_lower1, pink_upper1)
+        pink_mask2 = cv2.inRange(hsv_image, pink_lower2, pink_upper2)
+        
+        # Combiniamo le due maschere
+        tip_mask = cv2.bitwise_or(pink_mask1, pink_mask2)
+        # Applichiamo operazioni morfologiche per migliorare la maschera
+        tip_mask = detector.apply_morphology(tip_mask, kernel_size=3, close_iterations=1, open_iterations=1)
+        # Salva la maschera combinata se in modalità debug
+        if debug:
+            detector.save_debug_image(tip_mask, f"{color_name}_tip_mask_refined.jpg")
     else:
-        # Se il colore non è supportato, usiamo una maschera che include tutti i pixel non neri
-        s_channel = hsv_image[:, :, 1]
-        v_channel = hsv_image[:, :, 2]
-        color_mask = cv2.bitwise_and(s_channel > 30, v_channel > 30)
-        color_mask = color_mask.astype(np.uint8) * 255
+        # Per gli altri colori, usiamo la maschera standard
+        tip_mask = color_mask.copy()
     
-    # Applica operazioni morfologiche per migliorare la maschera
-    kernel = np.ones((3, 3), np.uint8)
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    # Applica operazioni morfologiche per migliorare la maschera delle basi
+    color_mask = detector.apply_morphology(color_mask, kernel_size=3, close_iterations=1, open_iterations=1)
     
-    # Trova i contorni nella maschera
-    contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Trova i contorni nella maschera speciale per le punte
+    contours = detector.find_contours(tip_mask)
     
     # Filtra i contorni per area massima (per trovare le punte)
     # Impostiamo soglie diverse per colori diversi
-    if color_name == 'red' or color_name == 'pink':
-        max_area = 40000  # Soglia più alta per rosso/rosa che tendono ad avere punte più grandi
-        min_area = 100
-    elif color_name == 'black':
-        max_area = 25000  # Soglia specifica per il nero
-        min_area = 50
-    elif color_name == 'blue' or color_name == 'light_blue':
-        max_area = 35000  # Soglia specifica per il blu/azzurro
-        min_area = 70
-    elif color_name == 'yellow':
-        max_area = 30000  # Soglia specifica per il giallo
-        min_area = 80
-    elif color_name == 'purple':
-        max_area = 28000  # Soglia specifica per il viola
-        min_area = 60
-    elif color_name == 'orange':
-        max_area = 32000  # Soglia specifica per l'arancione
-        min_area = 80
-    else:
-        max_area = 30000  # Soglia standard per gli altri colori
-        min_area = 50     # Soglia minima ridotta per evitare di perdere punte piccole
+    min_area, max_area = detector.get_min_max_area_for_tips()
+    
+    # Per i colori problematici, utilizziamo soglie di area ancora più permissive
+    if color_name == 'red':
+        min_area = min_area // 2  # Dimezziamo la soglia minima per il rosso
+        max_area = max_area * 2  # Raddoppiamo la soglia massima
+    elif color_name in ['black', 'purple', 'pink']:
+        min_area = min_area // 1.5  # Riduciamo la soglia minima
+        max_area = int(max_area * 1.5)  # Aumentiamo la soglia massima
+    
+    # Filtriamo i contorni per area e rapporto d'aspetto
     tip_contours = []
+    max_aspect_ratio = detector.get_max_aspect_ratio_for_tips()
     
     for c in contours:
         area = cv2.contourArea(c)
@@ -598,163 +891,135 @@ def detect_and_merge_pencil_tips(image: np.ndarray, pencils: List[Dict[str, Any]
             x, y, w, h = cv2.boundingRect(c)
             aspect_ratio = max(h, w) / min(h, w) if min(h, w) > 0 else 1000
             
-            # Usiamo criteri diversi in base al colore
-            if color_name in ['red', 'pink']:
-                max_aspect_ratio = 6.0  # Più permissivo per rosso/rosa
-            elif color_name == 'black':
-                max_aspect_ratio = 5.5  # Specifico per nero
-            elif color_name in ['blue', 'light_blue']:
-                max_aspect_ratio = 5.0  # Per blu/azzurro
-            else:
-                max_aspect_ratio = 4.5  # Standard per gli altri colori
-            
             # Accettiamo solo le forme che rispettano il criterio di aspect ratio
             if aspect_ratio < max_aspect_ratio:
                 tip_contours.append((x, y, w, h, c))
     
-    # Debug: visualizza le punte rilevate
+    # Salva un'immagine di debug con i contorni delle punte
     if debug:
-        # Assicuriamoci che la directory esista
-        import os
-        from image_utils.debug_manager import prepare_debug_directory
-        debug_dir = prepare_debug_directory()
-        color_debug_dir = os.path.join(debug_dir, color_name)
-        os.makedirs(color_debug_dir, exist_ok=True)
+        debug_image = image.copy()
+        cv2.drawContours(debug_image, [c for _, _, _, _, c in tip_contours], -1, (0, 255, 0), 2)
+        detector.save_debug_image(debug_image, f"{color_name}_tip_contours.jpg")
         
-        # Crea un'immagine con tutte le punte rilevate
-        tips_img = image.copy()
-        
-        # Disegna un rettangolo per ogni punta rilevata
-        for i, (x, y, w, h, c) in enumerate(tip_contours):
-            cv2.rectangle(tips_img, (x, y), (x+w, y+h), (0, 255, 255), 2)  # Giallo per le punte
-            # Aggiungi il testo con l'area e l'ID per debug
-            area = cv2.contourArea(c)
-            cv2.putText(tips_img, f"ID:{i} A:{int(area)}", (x, y-5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            
-            # Salva anche l'immagine di ogni singola punta rilevata
-            # Estrai un'area leggermente più grande della punta
-            border = 10
-            x1 = max(0, x - border)
-            y1 = max(0, y - border)
-            x2 = min(image.shape[1], x + w + border)
-            y2 = min(image.shape[0], y + h + border)
-            
-            # Estrai e salva l'immagine della punta singola
-            tip_single_img = image[y1:y2, x1:x2].copy()
-            tip_single_path = os.path.join(color_debug_dir, f"{color_name}_tip_{i}_solo.jpg")
-            cv2.imwrite(tip_single_path, tip_single_img)
-        
-        # Salva l'immagine con tutte le punte rilevate
-        tips_path = os.path.join(color_debug_dir, f"{color_name}_all_tips.jpg")
-        cv2.imwrite(tips_path, tips_img)
-        
-        # Salva la maschera usata per rilevare le punte
-        cv2.imwrite(os.path.join(color_debug_dir, f"{color_name}_tips_mask.jpg"), color_mask)
+        # Non salviamo più tutte le punte rilevate, solo quelle scelte
     
-    # Lista per memorizzare le matite con le punte unite
-    pencils_with_tips = []
+    # Crea una copia della lista di matite per aggiungere le punte
+    pencils_with_tips = pencils.copy()
     
     # Per ogni matita (base), cerca la punta corrispondente
     for i, pencil in enumerate(pencils):
         base_x, base_y, base_w, base_h = pencil['bbox']
         
-        # Calcola il range x in cui cercare la punta - ampliamo il range in base al colore
+        # Calcola il punto centrale in alto della base
+        base_center_x = base_x + base_w // 2
+        base_top_y = base_y
+        
+        # Definiamo il margine orizzontale in base al colore
         if color_name in ['red', 'pink']:
-            x_min = base_x - base_w * 1.5  # Più margine per rosso/rosa
-            x_max = base_x + base_w * 2.5
+            h_margin = base_w // 1.2  # Margine ancora più ampio per rosso/rosa
         elif color_name == 'black':
-            x_min = base_x - base_w * 1.2  # Margine specifico per nero
-            x_max = base_x + base_w * 2.2
-        elif color_name in ['blue', 'light_blue', 'purple']:
-            x_min = base_x - base_w * 1.3  # Margine per blu/azzurro/viola
-            x_max = base_x + base_w * 2.3
+            h_margin = base_w // 1.5  # Margine più ampio per nero
+        elif color_name in ['purple', 'violet']:
+            h_margin = base_w // 1.4  # Margine più ampio per viola
         else:
-            x_min = base_x - base_w  # Margine standard
-            x_max = base_x + base_w * 2
+            h_margin = base_w // 2  # Margine standard per gli altri colori
         
-        # Trova le punte che si sovrappongono con questo range x
-        matching_tips = []
-        for x, y, w, h, c in tip_contours:
-            # Verifica se la punta si sovrappone con il range x della base
-            # Consideriamo l'intero range della punta, non solo il centro
-            tip_x_min = x
-            tip_x_max = x + w
-            
-            # Verifichiamo se c'è sovrapposizione tra i range x
-            if (tip_x_min <= x_max and tip_x_max >= x_min):
-                # Verifica che la punta sia sopra o sotto la base (non al centro)
-                # Usiamo criteri diversi in base al colore
-                if color_name in ['red', 'pink']:
-                    # Per rosso/rosa, permettiamo punte più vicine alla base
-                    if y < base_y - h/4 or y > base_y + base_h - h/4:
-                        matching_tips.append((x, y, w, h, c))
-                elif color_name == 'black':
-                    # Per nero, siamo più restrittivi
-                    if y < base_y - h*0.6 or y > base_y + base_h - h*0.6:
-                        matching_tips.append((x, y, w, h, c))
-                else:
-                    # Criterio standard per gli altri colori
-                    if y < base_y - h/3 or y > base_y + base_h - h/3:
-                        matching_tips.append((x, y, w, h, c))
-        
-        # Se non ci sono punte corrispondenti, mantieni la matita originale
-        if not matching_tips:
-            pencils_with_tips.append(pencil)
-            continue
-        
-        # Trova la punta migliore in base alla posizione e dimensione
+        # Inizializza le variabili per la migliore punta
         best_tip = None
         best_score = float('inf')
         
-        for x, y, w, h, c in matching_tips:
-            # Calcola la distanza verticale dalla base
-            if y < base_y:  # Punta sopra la base
-                distance = base_y - (y + h)
-            else:  # Punta sotto la base
-                distance = y - (base_y + base_h)
-                
-            # Calcola la distanza orizzontale dal centro della base
-            base_center_x = base_x + base_w / 2
-            tip_center_x = x + w / 2
-            horizontal_distance = abs(base_center_x - tip_center_x)
+        # Cerca tra tutte le punte rilevate
+        for j, (tip_x, tip_y, tip_w, tip_h, tip_contour) in enumerate(tip_contours):
+            # Calcola il punto centrale in basso della punta
+            tip_center_x = tip_x + tip_w // 2
+            tip_bottom_y = tip_y + tip_h
             
-            # Calcola un punteggio che favorisce punte vicine e centrate
-            # Parametri di scoring diversi per colore
+            # Verifica se la punta è sopra la base (con una tolleranza)
+            # Usiamo tolleranze diverse in base al colore
             if color_name in ['red', 'pink']:
-                # Per rosso/rosa, diamo più importanza alla vicinanza verticale
-                score = distance * 1.5 + horizontal_distance * 1.5
-                min_area_ratio = 0.03  # Più permissivo per rosso/rosa
+                v_tolerance = 70  # Tolleranza molto maggiore per rosso/rosa
             elif color_name == 'black':
-                # Per nero, diamo più importanza all'allineamento orizzontale
-                score = distance + horizontal_distance * 3
-                min_area_ratio = 0.04  # Valore specifico per nero
-            elif color_name in ['blue', 'light_blue']:
-                # Per blu/azzurro, bilanciamo distanza verticale e orizzontale
-                score = distance * 1.2 + horizontal_distance * 2
-                min_area_ratio = 0.04
+                v_tolerance = 60  # Tolleranza maggiore per nero
+            elif color_name in ['purple', 'violet']:
+                v_tolerance = 150  # Tolleranza ESTREMAMENTE maggiore per viola
             else:
-                # Criterio standard per gli altri colori
-                score = distance + horizontal_distance * 2
-                min_area_ratio = 0.05
-            
-            # Se la punta è molto più piccola della base, potrebbe essere rumore
-            # Penalizziamo punte troppo piccole rispetto alla base
-            area_ratio = cv2.contourArea(c) / pencil['area']
-            if area_ratio < min_area_ratio:
-                score += 1000  # Penalizza fortemente
+                v_tolerance = 40  # Tolleranza aumentata per tutti i colori
                 
-            # Penalizza anche punte troppo grandi rispetto alla base
-            if area_ratio > 0.8:
-                score += 800  # Penalizza punte troppo grandi
+            if tip_bottom_y > base_top_y - v_tolerance:
+                continue  # La punta non è sopra la base
             
-            if score < best_score and distance >= 0:  # Assicuriamoci che non si sovrappongano
+            # Verifica se la punta è orizzontalmente allineata con la base
+            if abs(tip_center_x - base_center_x) > h_margin:
+                continue  # La punta non è allineata orizzontalmente con la base
+            
+            # Calcola un punteggio per questa punta
+            # Il punteggio è una combinazione di:
+            # - Distanza verticale (più piccola è meglio)
+            # - Distanza orizzontale dal centro (più piccola è meglio)
+            # - Differenza di dimensione (penalizziamo punte troppo piccole o troppo grandi rispetto alla base)
+            
+            # Usiamo pesi diversi in base al colore
+            if color_name == 'red':
+                v_weight = 0.5  # Peso molto minore per la distanza verticale per il rosso
+                h_weight = 3.0  # Peso molto maggiore per l'allineamento orizzontale
+            elif color_name == 'pink':
+                v_weight = 0.7  # Peso minore per la distanza verticale per il rosa
+                h_weight = 2.5  # Peso maggiore per l'allineamento orizzontale
+            elif color_name == 'black':
+                v_weight = 0.8  # Peso minore per il nero
+                h_weight = 2.5  # Peso maggiore per il nero
+            elif color_name == 'purple' or color_name == 'violet':
+                v_weight = 0.2  # Peso MOLTO minore per il viola
+                h_weight = 1.0  # Peso ridotto per l'allineamento orizzontale
+            else:
+                v_weight = 1.2  # Peso standard per la distanza verticale
+                h_weight = 1.8  # Peso standard per l'allineamento orizzontale
+            
+            v_distance = base_top_y - tip_bottom_y
+            h_distance = abs(tip_center_x - base_center_x)
+            
+            # Penalizza le punte troppo piccole o troppo grandi rispetto alla base
+            tip_area = cv2.contourArea(tip_contour)
+            base_area = pencil['area']
+            size_ratio = tip_area / base_area if base_area > 0 else 1000
+            
+            # Definiamo range accettabili per il rapporto di dimensione
+            if color_name == 'red':
+                min_size_ratio = 0.001  # Estremamente permissivo per il rosso
+                max_size_ratio = 0.5    # Limite superiore aumentato
+            elif color_name == 'pink':
+                min_size_ratio = 0.005  # Molto permissivo per il rosa
+                max_size_ratio = 0.45
+            elif color_name == 'black':
+                min_size_ratio = 0.003  # Più permissivo per il nero
+                max_size_ratio = 0.4
+            elif color_name == 'purple' or color_name == 'violet':
+                min_size_ratio = 0.0001  # Estremamente permissivo per il viola
+                max_size_ratio = 0.6     # Limite superiore molto aumentato
+            elif color_name == 'green':
+                min_size_ratio = 0.008  # Specifico per il verde
+                max_size_ratio = 0.4
+            else:
+                min_size_ratio = 0.008  # Standard aumentato
+                max_size_ratio = 0.38
+                
+            # Penalità per dimensioni fuori range
+            if size_ratio < min_size_ratio or size_ratio > max_size_ratio:
+                size_penalty = 1000  # Penalità alta per dimensioni fuori range
+            else:
+                size_penalty = 0
+            
+            # Calcola il punteggio finale
+            score = v_weight * v_distance + h_weight * h_distance + size_penalty
+            
+            # Se questo punteggio è migliore del precedente, aggiorna
+            if score < best_score:
                 best_score = score
-                best_tip = (x, y, w, h, c)
+                best_tip = (j, tip_x, tip_y, tip_w, tip_h, tip_contour)
         
-        # Se abbiamo trovato una punta valida, uniscila con la base
+        # Se abbiamo trovato una punta valida, aggiorna la matita
         if best_tip:
-            tip_x, tip_y, tip_w, tip_h, tip_contour = best_tip
+            j, tip_x, tip_y, tip_w, tip_h, tip_contour = best_tip
             
             # Crea un nuovo bounding box che include sia la base che la punta
             new_x = min(base_x, tip_x)
@@ -762,76 +1027,61 @@ def detect_and_merge_pencil_tips(image: np.ndarray, pencils: List[Dict[str, Any]
             new_w = max(base_x + base_w, tip_x + tip_w) - new_x
             new_h = max(base_y + base_h, tip_y + tip_h) - new_y
             
-            # Crea una copia della matita originale con il nuovo bounding box
-            new_pencil = pencil.copy()
-            new_pencil['bbox'] = (new_x, new_y, new_w, new_h)
-            new_pencil['has_tip'] = True
-            new_pencil['tip_bbox'] = (tip_x, tip_y, tip_w, tip_h)
+            # Aggiorna il bounding box della matita
+            pencils_with_tips[i]['bbox'] = (new_x, new_y, new_w, new_h)
             
-            # Debug: visualizza la matita con la punta unita
+            # Aggiorna anche l'area della matita
+            # Nota: non aggiorniamo il contorno perché sarebbe complicato unire i due contorni
+            pencils_with_tips[i]['area'] = pencils_with_tips[i]['area'] + cv2.contourArea(tip_contour)
+            
+            # Aggiungi informazioni sulla punta per debug
+            pencils_with_tips[i]['has_tip'] = True
+            pencils_with_tips[i]['tip_bbox'] = (tip_x, tip_y, tip_w, tip_h)
+            
+            # Stampa un messaggio di debug
             if debug:
-                # Crea un'immagine più grande per mostrare chiaramente la matita e la sua punta
-                # Aggiungiamo un bordo per rendere l'immagine più grande e chiara
-                border_size = 50
-                region_x = max(0, new_x - border_size)
-                region_y = max(0, new_y - border_size)
-                region_w = min(image.shape[1] - region_x, new_w + border_size * 2)
-                region_h = min(image.shape[0] - region_y, new_h + border_size * 2)
+                print(f"Punta {j} (area: {cv2.contourArea(tip_contour)}) unita alla matita {i} (colore: {color_name})")
                 
-                # Estrai la regione allargata
-                region_img = image[region_y:region_y+region_h, region_x:region_x+region_w].copy()
+                # Salva un'immagine della matita con la punta
+                merged_img = image.copy()
+                # Disegna la base in blu
+                cv2.rectangle(merged_img, (base_x, base_y), (base_x + base_w, base_y + base_h), (255, 0, 0), 2)
+                # Disegna la punta scelta in verde
+                cv2.rectangle(merged_img, (tip_x, tip_y), (tip_x + tip_w, tip_y + tip_h), (0, 255, 0), 2)
+                # Disegna una linea che collega la base alla punta
+                cv2.line(merged_img, (base_center_x, base_top_y), (tip_center_x, tip_bottom_y), (0, 255, 255), 2)
+                # Aggiungi informazioni sul punteggio
+                cv2.putText(merged_img, f"Score: {best_score:.2f}", (tip_x, tip_y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                # Salva l'immagine
+                detector.save_debug_image(merged_img, f"{color_name}_pencil_{i}_with_chosen_tip.jpg")
                 
-                # Adatta le coordinate al nuovo sistema di riferimento
-                local_base_x = base_x - region_x
-                local_base_y = base_y - region_y
-                local_tip_x = tip_x - region_x
-                local_tip_y = tip_y - region_y
-                local_new_x = new_x - region_x
-                local_new_y = new_y - region_y
-                
-                # Disegna i rettangoli
-                cv2.rectangle(region_img, (local_base_x, local_base_y), 
-                             (local_base_x+base_w, local_base_y+base_h), (0, 255, 0), 2)  # Verde per la base
-                cv2.rectangle(region_img, (local_tip_x, local_tip_y), 
-                             (local_tip_x+tip_w, local_tip_y+tip_h), (0, 255, 255), 2)  # Giallo per la punta
-                cv2.rectangle(region_img, (local_new_x, local_new_y), 
-                             (local_new_x+new_w, local_new_y+new_h), (255, 0, 0), 2)  # Blu per il box unito
-                
-                # Aggiungi etichette per chiarezza
-                cv2.putText(region_img, "Base", (local_base_x, local_base_y-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(region_img, "Punta", (local_tip_x, local_tip_y-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(region_img, "Unito", (local_new_x, local_new_y-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                
-                # Salva l'immagine con la visualizzazione della fusione
-                merged_path = os.path.join(color_debug_dir, f"{color_name}_pencil_{i+1}_merged.jpg")
-                cv2.imwrite(merged_path, region_img)
-                
-                # Aggiungiamo questa matita all'immagine di riepilogo
-                # Creiamo un dizionario per tenere traccia delle matite con punte
-                if not hasattr(detect_and_merge_pencil_tips, 'summary_img'):
-                    detect_and_merge_pencil_tips.summary_img = image.copy()
-                
-                # Disegna il rettangolo della matita con punta
-                cv2.rectangle(detect_and_merge_pencil_tips.summary_img, (new_x, new_y), (new_x+new_w, new_y+new_h), 
-                             COLOR_MAP.get(color_name, (0, 0, 255)), 3)  # Usa il colore della matita
-                
-                # Aggiungi etichetta con il colore e l'indice
-                cv2.putText(detect_and_merge_pencil_tips.summary_img, f"{color_name} {i+1}", (new_x, new_y-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_MAP.get(color_name, (0, 0, 255)), 2)
-                
-                # Salva l'immagine di riepilogo aggiornata
-                summary_path = os.path.join(debug_dir, f"all_pencils_with_tips.jpg")
-                cv2.imwrite(summary_path, detect_and_merge_pencil_tips.summary_img)
-                
-                # Stampa a console per debug
-                print(f"Rilevata punta per matita {color_name} {i+1}")
-            
-            pencils_with_tips.append(new_pencil)
+                # Salva anche l'immagine della sola punta scelta
+                tip_img = image[tip_y:tip_y+tip_h, tip_x:tip_x+tip_w].copy()
+                detector.save_debug_image(tip_img, f"{color_name}_chosen_tip_{i}.jpg")
         else:
-            # Se non abbiamo trovato una punta valida, mantieni la matita originale
-            pencils_with_tips.append(pencil)
+            # Se non abbiamo trovato una punta, aggiungi questa informazione
+            pencils_with_tips[i]['has_tip'] = False
+    
+    # Debug: salva un'immagine con tutte le matite e le punte
+    if debug:
+        merged_img = image.copy()
+        
+        # Disegna tutte le matite
+        for i, pencil in enumerate(pencils_with_tips):
+            x, y, w, h = pencil['bbox']
+            # Colore diverso in base a se ha una punta o meno
+            if pencil.get('has_tip', False):
+                color = (0, 255, 0)  # Verde per le matite con punta
+                # Disegna anche la punta
+                tip_x, tip_y, tip_w, tip_h = pencil['tip_bbox']
+                cv2.rectangle(merged_img, (tip_x, tip_y), (tip_x+tip_w, tip_y+tip_h), (0, 255, 255), 2)
+            else:
+                color = (0, 0, 255)  # Rosso per le matite senza punta
+            
+            cv2.rectangle(merged_img, (x, y), (x+w, y+h), color, 2)
+            cv2.putText(merged_img, f"ID: {i}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # Salva l'immagine
+        detector.save_debug_image(merged_img, f"{color_name}_all_merged_pencils.jpg")
     
     return pencils_with_tips
