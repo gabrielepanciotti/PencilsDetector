@@ -1,15 +1,45 @@
 # FlyCatcher - Sistema Avanzato di Rilevamento Matite Colorate
 
-Un sistema di computer vision avanzato per rilevare, contare e localizzare matite colorate nelle immagini, con particolare attenzione al rilevamento accurato delle punte e alla gestione di matite sovrapposte o vicine.
+Un sistema di computer vision avanzato per rilevare, contare e localizzare matite colorate nelle immagini, con particolare attenzione al rilevamento accurato delle punte e alla gestione di matite sovrapposte o vicine. Il sistema è progettato per funzionare con immagini di alta qualità di matite colorate disposte su una superficie piana, anche in condizioni di sovrapposizione parziale o vicinanza tra matite dello stesso colore.
 
 ## Caratteristiche Principali
 
-- **Rilevamento Multi-Colore**: Supporto per matite di diversi colori (verde, rosso, blu, giallo, viola, arancione, rosa, marrone, azzurro, nero)
-- **Divisione Intelligente**: Algoritmo di clustering K-means per separare matite dello stesso colore vicine o sovrapposte
-- **Rilevamento Punte**: Sistema specializzato per identificare le punte delle matite e associarle correttamente alle basi
-- **Gestione Casi Speciali**: Trattamento specifico per colori problematici come rosso (gestione del wrapping hue), viola (maschere ampliate) e rosa (filtri aggiuntivi)
-- **Visualizzazione Avanzata**: Output visivo con bounding box colorate e etichette per ogni matita rilevata
-- **Modalità Debug**: Generazione di immagini intermedie per analizzare ogni fase del processo di rilevamento
+- **Rilevamento Multi-Colore**: Supporto completo per matite di diversi colori
+
+- **Divisione Intelligente**: 
+  - Algoritmo di clustering K-means per separare matite dello stesso colore vicine o sovrapposte
+  - Analisi dettagliata delle variazioni di tonalità (hue) all'interno di ogni bounding box
+  - Verifica di sovrapposizione tra matite divise con calcolo IoU (Intersection over Union)
+  - Filtro per evitare duplicati con soglia IoU > 0.2
+
+- **Rilevamento Punte**: 
+  - Sistema multi-fase per identificare le punte delle matite con maschere HSV specializzate
+  - Algoritmo di associazione punta-base basato su tre criteri principali:
+    1. Allineamento verticale (la punta deve essere sopra la base)
+    2. Allineamento orizzontale (la punta deve essere centrata rispetto alla base)
+    3. Dimensione relativa (la punta deve avere dimensioni proporzionate alla base)
+  - Parametri personalizzati per ogni colore per ottimizzare l'associazione
+  - Gestione speciale per punte difficili da rilevare (viola, rosa, nero)
+
+- **Gestione Casi Speciali**: 
+  - **Rosso**: Gestione del wrapping hue attorno a 180/0 gradi con doppia maschera
+  - **Viola**: 
+    - Range HSV estremamente ampio (115-175 per hue)
+  - **Rosa**: 
+    - Filtro per evitare falsi positivi
+
+- **Visualizzazione Avanzata**: 
+  - Output visivo con bounding box colorate secondo una mappa colori predefinita
+  - Etichette per ogni matita con nome del colore e indice progressivo
+  - Salvataggio dell'immagine risultante in alta risoluzione
+
+- **Modalità Debug**: 
+  - Generazione di oltre 100 immagini intermedie per analizzare ogni fase del processo
+  - Salvataggio di maschere HSV per ogni colore
+  - Visualizzazione delle regioni di interesse per ogni matita rilevata
+  - Maschere separate per punte e basi
+  - Log dettagliati delle operazioni di divisione e associazione
+  - File CSV con informazioni su area, aspect ratio e altre metriche
 
 ## Architettura del Sistema
 
