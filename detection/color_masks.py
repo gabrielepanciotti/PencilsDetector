@@ -109,9 +109,7 @@ def get_green_mask(hsv_image: np.ndarray) -> np.ndarray:
         Binary mask where green pixels are white (255)
     """
     # Get green color range from config
-    green_range = COLOR_RANGES['green']
-    lower_green = np.array(green_range['lower'])
-    upper_green = np.array(green_range['upper'])
+    lower_green, upper_green = COLOR_RANGES['green']
     
     # Create initial green mask
     mask = cv2.inRange(hsv_image, lower_green, upper_green)
