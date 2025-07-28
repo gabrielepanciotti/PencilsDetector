@@ -1,0 +1,28 @@
+Categoria,Task
+Ambiente di lavoro,"Setup ambiente con torch, opencv, sklearn"
+Ambiente di lavoro,"Creazione cartelle progetto (input, output, models...)"
+Ambiente di lavoro,Template Notebook con sezioni già pronte
+Preprocessing,"Resize, grayscale, blur, edge detection"
+Preprocessing,"Normalizzazione, CLAHE"
+Preprocessing,Visualizzazione anomalie
+Immagini classificate,CNN classificatore (es. ResNet18)
+Immagini classificate,Augmentation per classi sbilanciate
+Immagini classificate,Valutazione con accuracy/F1/confusion
+Immagini non supervisionate,Autoencoder su immagini
+Immagini non supervisionate,Calcolo MSE su immagini ricostruite
+Immagini non supervisionate,Heatmap delle anomalie
+Object detection,YOLOv8 object detection
+Object detection,Script inference batch
+Object detection,"Metriche detection (precision, recall)"
+Time-series / Video,Estrarre frame video
+Time-series / Video,"Feature da frame (colori, area, keypoints)"
+Time-series / Video,Clustering / Isolation Forest
+Segmentazione,Segmentazione (U-Net o OpenCV)
+Segmentazione,Visualizzazione overlay
+Utilities,Save results
+Utilities,Plot ROC
+Utilities,Log esperimenti
+Utilities,Loader immagini
+Documentazione,README con spiegazione
+Documentazione,Notebook/PDF finale
+Documentazione,Codice commentato e modulare

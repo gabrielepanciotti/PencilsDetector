@@ -1,0 +1,88 @@
+# Configuration file for anomaly detection project
+
+# Data settings
+data:
+  data_dir: "data/raw"
+  processed_dir: "data/processed"
+  output_dir: "data/output"
+  img_size: [224, 224]  # [height, width]
+  batch_size: 32
+  val_split: 0.2
+  test_split: 0.1
+  random_state: 42
+  num_workers: 4
+
+# Preprocessing settings
+preprocessing:
+  normalize: true
+  normalization_method: "minmax"  # "minmax", "zscore", "clahe"
+  augmentation: true
+  augmentations:
+    - name: "horizontal_flip"
+      probability: 0.5
+    - name: "vertical_flip"
+      probability: 0.3
+    - name: "random_brightness_contrast"
+      probability: 0.2
+    - name: "gaussian_noise"
+      probability: 0.2
+    - name: "blur"
+      probability: 0.2
+
+# Model settings
+model:
+  type: "autoencoder"  # "autoencoder", "deep_svdd", "vae", "ganomaly"
+  input_shape: [3, 224, 224]  # [channels, height, width]
+  
+  # Autoencoder settings
+  autoencoder:
+    latent_dim: 128
+    hidden_dims: [32, 64, 128, 256]
+    learning_rate: 0.001
+    epochs: 50
+    batch_size: 32
+  
+  # Deep SVDD settings
+  deep_svdd:
+    output_dim: 128
+    learning_rate: 0.0001
+    epochs: 50
+    batch_size: 32
+    weight_decay: 0.000001
+    objective: "one-class"  # "one-class" or "soft-boundary"
+    nu: 0.1
+
+# Training settings
+training:
+  device: "cuda"  # "cuda" or "cpu"
+  learning_rate: 0.001
+  epochs: 50
+  batch_size: 32
+  early_stopping: true
+  patience: 10
+  save_best_only: true
+  model_dir: "models"
+  experiment_name: "anomaly_detection"
+
+# Evaluation settings
+evaluation:
+  threshold_method: "f1"  # "f1", "accuracy", "precision", "recall"
+  metrics:
+    - "roc_auc"
+    - "pr_auc"
+    - "f1_score"
+    - "precision"
+    - "recall"
+    - "accuracy"
+  visualization:
+    save_plots: true
+    plots_dir: "data/output/plots"
+    n_samples: 10
+
+# Logging settings
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  tensorboard: true
+  mlflow: true
+  mlflow_tracking_uri: "mlruns"
